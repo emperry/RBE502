@@ -38,10 +38,13 @@ class Controller(Node):
         self.timer = self.create_timer(timer_period, self.cmdloop_callback)
         self.dt = timer_period
 
-        self.parse_parameters()
+        self.nav_state=0
+        self.arming_state=0
+
+        self.parse_params()
         self.arm()
 
-    def parse_parameters():        
+    def parse_params(self):        
         #TODO update these as we go. declare a parameter for each GLOBAL variable 
         self.declare_parameter('radius', 10.0)  #Parameter name and then default value
         self.declare_parameter('omega', 5.0)    #Technically, in a real-world scenario these would be specified  in a .yaml 
@@ -56,11 +59,12 @@ class Controller(Node):
 
 
     def vehicle_status_callback(self, msg):
-            # TODO: handle NED->ENU transformation
-            print("NAV_STATUS: ", msg.nav_state)
-            print("  - offboard status: ", VehicleStatus.NAVIGATION_STATE_OFFBOARD)
-            self.nav_state = msg.nav_state
-            self.arming_state = msg.arming_state
+        # TODO: handle NED->ENU transformation
+        print("NAV_STATUS: ", msg.nav_state)
+        print("  - offboard status: ", VehicleStatus.NAVIGATION_STATE_OFFBOARD)
+        print("  - arm status: ", msg.arming_state)
+        self.nav_state = msg.nav_state
+        self.arming_state = msg.arming_state
 
 
     def cmdloop_callback(self):
@@ -81,13 +85,31 @@ class Controller(Node):
 
             self.theta = self.theta + self.omega * self.dt
 
-    def arm():
-        self.publish_arm_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
+        else:
+            try:
+                self.arm()
+                msg = VehicleCommand()
+                msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
+                msg.param1 = 1.
+                msg.param2 = 6.
+                self.publish_arm_command.publish(msg)
 
-    def disarm():
-        self.publish_arm_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
+            except:
+                print("couldn't turn on offboard mode yet")
 
-    def group_controller(control_inputs): #errors, current state, etc. IN 
+    def arm(self):
+        msg = VehicleCommand()
+        msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
+        msg.param1 = 1.
+        self.publish_arm_command.publish(msg)
+
+    def disarm(self):
+        msg = VehicleCommand()
+        msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
+        msg.param1 = 0.
+        self.publish_arm_command.publish(msg)
+
+    def group_controller(self, control_inputs): #errors, current state, etc. IN 
         #TODO: OUR CODE HERE 
         #we'll return our controller OUTPUTS and use the timer callback function
         #to send the responses back to the AP (autopilot) at the specified frequency
