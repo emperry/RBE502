@@ -109,13 +109,25 @@ class Controller(Node):
         msg.param1 = 0.
         self.publish_arm_command.publish(msg)
 
-    def group_controller(self, control_inputs): #errors, current state, etc. IN 
+    def group_controller(self, position, velocity, des_pos, des_vel): #errors, current state, etc. IN 
         #TODO: OUR CODE HERE 
         #we'll return our controller OUTPUTS and use the timer callback function
         #to send the responses back to the AP (autopilot) at the specified frequency
         #basically the timer will run every 0.02 seconds, call THIS function to get 
         #updated control output information and then send it out
-        return [0, 0, 10]
+        kp = [10 0 0;
+               0 10 0;
+               0  0 10]
+
+        kd = [10 0 0;
+               0 10 0;
+               0  0 10]
+        e = des_pos - position
+        de = velocity - des_vel
+
+        output = kp*e + kd*de
+
+        return output  #The output is goes directly into the velocity inputs of the autopilot
 
     
 
