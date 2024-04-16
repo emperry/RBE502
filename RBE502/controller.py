@@ -25,10 +25,12 @@ class Controller(Node):
         )  #QOS profiles are stupid and i hate them and we never use anything but the default at work, but the XRCE app is fancy and decided to use this one. Nothing we need to be concerned with
         self.status_sub = self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status',self.vehicle_status_callback, qos_profile)
 
-        
+        #Publisher for the purpose of arming and disarming the quad so we can control it
         self.publish_arm_command = self.create_publisher(VehicleCommand,'/fmu/in/vehicle_command', qos_profile)
+        
         #Publisher to tell the AP what mode to be in and what type of setpoints to expect (position, velocity, etc)
         self.publisher_offboard_mode = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', qos_profile)
+        
         #the actual position/velocity/etc setpoint publisher
         self.publisher_trajectory = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
 
@@ -38,9 +40,24 @@ class Controller(Node):
         self.timer = self.create_timer(timer_period, self.cmdloop_callback)
         self.dt = timer_period
 
+        self.attitude_sub = self.create_subscription(VehicleAttitude,'/fmu/out/vehicle_attitude', self.vehicle_attitude_callback, qos_profile)
+        
+        self.local_position_sub = self.create_subscription(
+            VehicleLocalPosition,
+            '/fmu/out/vehicle_local_position',
+            self.vehicle_local_position_callback,
+            qos_profile)
+
         self.nav_state=0
         self.arming_state=0
+        
+        self.vehicle_attitude = np.empty(4)
+        self.vehicle_local_position = np.empty(3)
+        self.vehicle_local_velocity = np.empty(3)
 
+        self.cube = np.array([1,1,1], [2,1,1], [2,2,1], [1,2,1], [1,1,1], [1,1,2], [2,1,2], [2,2,2], [1,2,2], [1,1,2])
+        self.setpoint_num = 0
+        
         self.parse_params()
         self.arm()
 
@@ -66,24 +83,50 @@ class Controller(Node):
         self.nav_state = msg.nav_state
         self.arming_state = msg.arming_state
 
+    def vehicle_attitude_callback(self, msg):
+        # TODO: handle NED->ENU transformation 
+        self.vehicle_attitude[0] = msg.q[0]
+        self.vehicle_attitude[1] = msg.q[1]
+        self.vehicle_attitude[2] = -msg.q[2]
+        self.vehicle_attitude[3] = -msg.q[3]
+
+    def vehicle_local_position_callback(self, msg):
+        # TODO: handle NED->ENU transformation 
+        self.vehicle_local_position[0] = msg.x
+        self.vehicle_local_position[1] = -msg.y
+        self.vehicle_local_position[2] = -msg.z
+        self.vehicle_local_velocity[0] = msg.vx
+        self.vehicle_local_velocity[1] = -msg.vy
+        self.vehicle_local_velocity[2] = -msg.vz
+
+
 
     def cmdloop_callback(self):
         # Publish offboard control modes. Set whatever we're controlling to TRUE, everything unnecessary to FALSE
         offboard_msg = OffboardControlMode()
         offboard_msg.timestamp = int(Clock().now().nanoseconds / 1000)
-        offboard_msg.position=True        
-        offboard_msg.velocity=False
+        offboard_msg.position=False        
+        offboard_msg.velocity=True
         offboard_msg.acceleration=False
         self.publisher_offboard_mode.publish(offboard_msg)
+    
+        #Determine if we've hit the last setpoint. If yes, then set the setpoint to the next one in the series. If no, set all velocities to 0 to hover at the last setpoint.
+        ##If we're pretty darn close ( less than 0.01 m? we can play with that a little) and the controller is responding to that (velocity setpoints are getting smaller as we converge - not overshooting like crazy ans settling on the point) then we can move on
+        velocity_vector_magnitude = math.sqrt(sum(pow(element, 2) for element in self.vehicle_local_velocity)
+        if (math.abs(self.vehicle_local_position - self.vehicle_desired_position) <=0.01 && velocity_vector_magnitude <= 0.01): 
+            #if we're not on the last setpoint already
+            if self.setpoint_num <= self.cube.size()[0] -1:
+                self.setpoint_num = self.setpoint_num + 1
+                self.des_position = self.cube[self.setpoint_num]
+        else:
+            self.des_velocity= [0,0,0]    
+        
         if (self.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD and self.arming_state == VehicleStatus.ARMING_STATE_ARMED):
-
+            updated_velocities = group_controller(self.vehicle_local_position, self.vehicle_local_velocity, self.des_position, self.des_velocity)
             trajectory_msg = TrajectorySetpoint()
-            trajectory_msg.position[0] = self.radius * np.cos(self.theta)
-            trajectory_msg.position[1] = self.radius * np.sin(self.theta)
-            trajectory_msg.position[2] = -self.altitude
+            trajectory_msg.velocity = updated_velocities
             self.publisher_trajectory.publish(trajectory_msg)
-
-            self.theta = self.theta + self.omega * self.dt
+            self.des_velocity = updated_velocities
 
         else:
             try:
@@ -115,17 +158,13 @@ class Controller(Node):
         #to send the responses back to the AP (autopilot) at the specified frequency
         #basically the timer will run every 0.02 seconds, call THIS function to get 
         #updated control output information and then send it out
-        kp = [10 0 0;
-               0 10 0;
-               0  0 10]
-
-        kd = [10 0 0;
-               0 10 0;
-               0  0 10]
+        kp = np.diag([10, 10, 10]);
+        kd = np.diag([10, 10, 10]); 
+              
         e = des_pos - position
-        de = velocity - des_vel
-
-        output = kp*e + kd*de
+        de = des_vel - velocity
+        
+        output = kp @ e + kd @ de 
 
         return output  #The output is goes directly into the velocity inputs of the autopilot
 
