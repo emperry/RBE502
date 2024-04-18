@@ -1,6 +1,7 @@
 import rclpy
 from std_msgs.msg import String
 import numpy as np
+import math
 from rclpy.node import Node
 from rclpy.clock import Clock
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
@@ -10,6 +11,7 @@ from px4_msgs.msg import TrajectorySetpoint
 from px4_msgs.msg import VehicleStatus
 from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import VehicleControlMode 
+from px4_msgs.msg import VehicleLocalPosition
 
 class Controller(Node):
 
@@ -39,8 +41,6 @@ class Controller(Node):
         timer_period = 0.02  # seconds. Starting at about 50Hz and we can decrease the refresh rate as needed based on how computationally expensive our app is
         self.timer = self.create_timer(timer_period, self.cmdloop_callback)
         self.dt = timer_period
-
-        self.attitude_sub = self.create_subscription(VehicleAttitude,'/fmu/out/vehicle_attitude', self.vehicle_attitude_callback, qos_profile)
         
         self.local_position_sub = self.create_subscription(
             VehicleLocalPosition,
@@ -55,8 +55,11 @@ class Controller(Node):
         self.vehicle_local_position = np.empty(3)
         self.vehicle_local_velocity = np.empty(3)
 
-        self.cube = np.array([1,1,1], [2,1,1], [2,2,1], [1,2,1], [1,1,1], [1,1,2], [2,1,2], [2,2,2], [1,2,2], [1,1,2])
+        self.cube = np.array([[0,0,1],[1,1,1], [2,1,1], [2,2,1], [1,2,1], [1,1,1], [1,1,2], [2,1,2], [2,2,2], [1,2,2], [1,1,2]])
         self.setpoint_num = 0
+        self.des_position = self.cube[self.setpoint_num]
+
+        self.position_error=0
         
         self.parse_params()
         self.arm()
@@ -80,15 +83,9 @@ class Controller(Node):
         print("NAV_STATUS: ", msg.nav_state)
         print("  - offboard status: ", VehicleStatus.NAVIGATION_STATE_OFFBOARD)
         print("  - arm status: ", msg.arming_state)
+        print("ERROR: ", self.position_error)
         self.nav_state = msg.nav_state
         self.arming_state = msg.arming_state
-
-    def vehicle_attitude_callback(self, msg):
-        # TODO: handle NED->ENU transformation 
-        self.vehicle_attitude[0] = msg.q[0]
-        self.vehicle_attitude[1] = msg.q[1]
-        self.vehicle_attitude[2] = -msg.q[2]
-        self.vehicle_attitude[3] = -msg.q[3]
 
     def vehicle_local_position_callback(self, msg):
         # TODO: handle NED->ENU transformation 
@@ -112,19 +109,22 @@ class Controller(Node):
     
         #Determine if we've hit the last setpoint. If yes, then set the setpoint to the next one in the series. If no, set all velocities to 0 to hover at the last setpoint.
         ##If we're pretty darn close ( less than 0.01 m? we can play with that a little) and the controller is responding to that (velocity setpoints are getting smaller as we converge - not overshooting like crazy ans settling on the point) then we can move on
-        velocity_vector_magnitude = math.sqrt(sum(pow(element, 2) for element in self.vehicle_local_velocity)
-        if (math.abs(self.vehicle_local_position - self.vehicle_desired_position) <=0.01 && velocity_vector_magnitude <= 0.01): 
+        v_sum=0
+        for element in self.vehicle_local_velocity:
+            v_sum += pow(float(element), 2)
+        velocity_vector_magnitude = math.sqrt(v_sum) 
+        if (np.average(np.array(abs(self.vehicle_local_position - self.des_position))) <=0.05 and velocity_vector_magnitude <= 0.05): 
             #if we're not on the last setpoint already
             if self.setpoint_num <= self.cube.size()[0] -1:
                 self.setpoint_num = self.setpoint_num + 1
-                self.des_position = self.cube[self.setpoint_num]
+                oself.des_position = self.cube[self.setpoint_num]
         else:
             self.des_velocity= [0,0,0]    
         
         if (self.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD and self.arming_state == VehicleStatus.ARMING_STATE_ARMED):
-            updated_velocities = group_controller(self.vehicle_local_position, self.vehicle_local_velocity, self.des_position, self.des_velocity)
+            updated_velocities = self.group_controller(self.vehicle_local_position, self.vehicle_local_velocity, self.des_position, self.des_velocity)
             trajectory_msg = TrajectorySetpoint()
-            trajectory_msg.velocity = updated_velocities
+            trajectory_msg.velocity = np.array(updated_velocities,dtype=np.float32)
             self.publisher_trajectory.publish(trajectory_msg)
             self.des_velocity = updated_velocities
 
@@ -158,13 +158,15 @@ class Controller(Node):
         #to send the responses back to the AP (autopilot) at the specified frequency
         #basically the timer will run every 0.02 seconds, call THIS function to get 
         #updated control output information and then send it out
-        kp = np.diag([10, 10, 10]);
-        kd = np.diag([10, 10, 10]); 
+        kp = np.diag([80, 80, 100])
+        kd = np.diag([10, 10, 10])
               
         e = des_pos - position
         de = des_vel - velocity
         
         output = kp @ e + kd @ de 
+
+        self.position_error = e
 
         return output  #The output is goes directly into the velocity inputs of the autopilot
 
