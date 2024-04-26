@@ -120,8 +120,8 @@ class Controller(Node):
         
         if (np.average(np.array(abs(self.vehicle_local_position - self.des_position))) <=0.05 and velocity_vector_magnitude <= 0.05): 
             #if we're not on the last setpoint already
-            
-            if self.setpoint_num <= self.cube.size()[0] -1:
+            print(self.cube.shape)
+            if self.setpoint_num <= self.cube.shape[0] -1:
                 self.setpoint_num = self.setpoint_num + 1
                 self.des_position = self.cube[self.setpoint_num]
         else:
@@ -136,7 +136,11 @@ class Controller(Node):
                         
             trajectory_msg.velocity = np.array(updated_velocities,dtype=np.float32)
             print(trajectory_msg)
-            #trajectory_msg.position = np.array(self.des_position,dtype=np.float32)
+            fill_others = np.array([np.nan, np.nan, np.nan],dtype=np.float32)
+            trajectory_msg.position = fill_others
+            trajectory_msg.acceleration = fill_others
+            trajectory_msg.jerk = fill_others
+            
 
             self.publisher_trajectory.publish(trajectory_msg)
             self.des_velocity = updated_velocities
@@ -162,8 +166,8 @@ class Controller(Node):
     def publish_offboard_control_heartbeat_signal(self):
         """Publish the offboard control mode."""
         msg = OffboardControlMode()
-        msg.position = True
-        msg.velocity = False
+        msg.position = False
+        msg.velocity = True
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
@@ -190,7 +194,7 @@ class Controller(Node):
         #to send the responses back to the AP (autopilot) at the specified frequency
         #basically the timer will run every 0.02 seconds, call THIS function to get 
         #updated control output information and then send it out
-        kp = np.diag([5.5, 5.5, 35])
+        kp = np.diag([3, 3, 20])
         kd = np.diag([1.2, 1.2, 2])
               
         e = des_pos - position
