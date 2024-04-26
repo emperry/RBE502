@@ -55,14 +55,15 @@ class Controller(Node):
         self.vehicle_local_position = np.empty(3)
         self.vehicle_local_velocity = np.empty(3)
 
-        self.cube = np.array([[0,0,1],[1,1,1], [2,1,1], [2,2,1], [1,2,1], [1,1,1], [1,1,2], [2,1,2], [2,2,2], [1,2,2], [1,1,2]])
+        self.cube = np.array([[0,0,-5],[5,5,-5], [10,5,-5], [10,10,-5], [5,10,-5], [5,5,-5], [5,5,-10], [10,5,-5], [10,10,-10], [5,10,-10], [5,5,-10]])
         self.setpoint_num = 0
         self.des_position = self.cube[self.setpoint_num]
 
-        self.position_error=0
+        self.position_error=self.des_position
         
         self.parse_params()
-        self.arm()
+        self.heartbeats=0
+        #self.arm()
 
     def parse_params(self):        
         #TODO update these as we go. declare a parameter for each GLOBAL variable 
@@ -83,18 +84,20 @@ class Controller(Node):
         print("NAV_STATUS: ", msg.nav_state)
         print("  - offboard status: ", VehicleStatus.NAVIGATION_STATE_OFFBOARD)
         print("  - arm status: ", msg.arming_state)
-        print("ERROR: ", self.position_error)
+        print("    Position Error: ", self.position_error)
         self.nav_state = msg.nav_state
         self.arming_state = msg.arming_state
 
     def vehicle_local_position_callback(self, msg):
         # TODO: handle NED->ENU transformation 
         self.vehicle_local_position[0] = msg.x
-        self.vehicle_local_position[1] = -msg.y
-        self.vehicle_local_position[2] = -msg.z
+        self.vehicle_local_position[1] = msg.y
+        self.vehicle_local_position[2] = msg.z
         self.vehicle_local_velocity[0] = msg.vx
-        self.vehicle_local_velocity[1] = -msg.vy
-        self.vehicle_local_velocity[2] = -msg.vz
+        self.vehicle_local_velocity[1] = msg.vy
+        self.vehicle_local_velocity[2] = msg.vz
+        print("     position: ", self.vehicle_local_position)
+        print("     velocity: ", self.vehicle_local_velocity)
 
 
 
@@ -105,49 +108,78 @@ class Controller(Node):
         offboard_msg.position=False        
         offboard_msg.velocity=True
         offboard_msg.acceleration=False
+        offboard_msg.attitude=False
+        offboard_msg.body_rate=False
+        offboard_msg.thrust_and_torque=False
+        offboard_msg.direct_actuator=False
         self.publisher_offboard_mode.publish(offboard_msg)
     
         #Determine if we've hit the last setpoint. If yes, then set the setpoint to the next one in the series. If no, set all velocities to 0 to hover at the last setpoint.
         ##If we're pretty darn close ( less than 0.01 m? we can play with that a little) and the controller is responding to that (velocity setpoints are getting smaller as we converge - not overshooting like crazy ans settling on the point) then we can move on
-        v_sum=0
-        for element in self.vehicle_local_velocity:
-            v_sum += pow(float(element), 2)
-        velocity_vector_magnitude = math.sqrt(v_sum) 
+        velocity_vector_magnitude = np.linalg.norm(self.vehicle_local_velocity)
+        
         if (np.average(np.array(abs(self.vehicle_local_position - self.des_position))) <=0.05 and velocity_vector_magnitude <= 0.05): 
             #if we're not on the last setpoint already
+            
             if self.setpoint_num <= self.cube.size()[0] -1:
                 self.setpoint_num = self.setpoint_num + 1
-                oself.des_position = self.cube[self.setpoint_num]
+                self.des_position = self.cube[self.setpoint_num]
         else:
             self.des_velocity= [0,0,0]    
         
         if (self.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD and self.arming_state == VehicleStatus.ARMING_STATE_ARMED):
             updated_velocities = self.group_controller(self.vehicle_local_position, self.vehicle_local_velocity, self.des_position, self.des_velocity)
+            print("     Controller Out: ",updated_velocities)
+            
             trajectory_msg = TrajectorySetpoint()
+            trajectory_msg.timestamp = int(Clock().now().nanoseconds / 1000)
+                        
             trajectory_msg.velocity = np.array(updated_velocities,dtype=np.float32)
+            print(trajectory_msg)
+            #trajectory_msg.position = np.array(self.des_position,dtype=np.float32)
+
             self.publisher_trajectory.publish(trajectory_msg)
             self.des_velocity = updated_velocities
+            
 
         else:
-            try:
+            if self.heartbeats <= 10:
+                self.publish_offboard_control_heartbeat_signal()
+                self.heartbeats += 1
+                print("couldn't turn on offboard mode yet")
+            else:
                 self.arm()
                 msg = VehicleCommand()
+                msg.timestamp = int(Clock().now().nanoseconds / 1000)
                 msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
                 msg.param1 = 1.
                 msg.param2 = 6.
                 self.publish_arm_command.publish(msg)
 
-            except:
-                print("couldn't turn on offboard mode yet")
+            #except:
+            
 
+    def publish_offboard_control_heartbeat_signal(self):
+        """Publish the offboard control mode."""
+        msg = OffboardControlMode()
+        msg.position = True
+        msg.velocity = False
+        msg.acceleration = False
+        msg.attitude = False
+        msg.body_rate = False
+        msg.timestamp = int(Clock().now().nanoseconds / 1000)
+        self.publisher_offboard_mode.publish(msg)
+    
     def arm(self):
         msg = VehicleCommand()
+        msg.timestamp = int(Clock().now().nanoseconds / 1000)
         msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
         msg.param1 = 1.
         self.publish_arm_command.publish(msg)
 
     def disarm(self):
         msg = VehicleCommand()
+        msg.timestamp = int(Clock().now().nanoseconds / 1000)
         msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
         msg.param1 = 0.
         self.publish_arm_command.publish(msg)
@@ -158,8 +190,8 @@ class Controller(Node):
         #to send the responses back to the AP (autopilot) at the specified frequency
         #basically the timer will run every 0.02 seconds, call THIS function to get 
         #updated control output information and then send it out
-        kp = np.diag([80, 80, 100])
-        kd = np.diag([10, 10, 10])
+        kp = np.diag([5.5, 5.5, 35])
+        kd = np.diag([1.2, 1.2, 2])
               
         e = des_pos - position
         de = des_vel - velocity
