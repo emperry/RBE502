@@ -5,6 +5,8 @@ import math
 from rclpy.node import Node
 from rclpy.clock import Clock
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+import csv
+import matplotlib.pyplot as plt
 
 from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import TrajectorySetpoint
@@ -55,14 +57,22 @@ class Controller(Node):
         self.vehicle_local_position = np.empty(3)
         self.vehicle_local_velocity = np.empty(3)
 
-        self.cube = np.array([[0,0,-5],[5,5,-5], [10,5,-5], [10,10,-5], [5,10,-5], [5,5,-5], [5,5,-10], [10,5,-5], [10,10,-10], [5,10,-10], [5,5,-10]])
+        self.cube = np.array([[0,0,-5],[0,1,-5], [1,1,-5], [1, 0, -5], [0,0,-5], [0,0,-6], [0,1,-6], [0,1,-5], [0,1,-6], [1,1,-6], [1,1,-5], [1,1,-6], [1,0,-6],[1,0,-5],[1,0,-6], [0,0,-6]])
         self.setpoint_num = 0
         self.des_position = self.cube[self.setpoint_num]
 
         self.position_error=self.des_position
+        self.i = 0
         
         self.parse_params()
         self.heartbeats=0
+        plt.ion()
+        plt.show(block=False)
+
+        self.x1 = np.array([])
+        self.x2 = np.array([])
+        self.x3 = np.array([])
+        self.ts = np.array([])
         #self.arm()
 
     def parse_params(self):        
@@ -87,6 +97,34 @@ class Controller(Node):
         print("    Position Error: ", self.position_error)
         self.nav_state = msg.nav_state
         self.arming_state = msg.arming_state
+        
+        filename = 'pd.csv'
+
+        row = [msg.timestamp,self.des_position[0], self.des_position[1], self.des_position[2], self.vehicle_local_position[0], self.vehicle_local_position[1], self.vehicle_local_position[2], self.vehicle_local_velocity[0],self.vehicle_local_velocity[1],self.vehicle_local_velocity[2], self.position_error[0],self.position_error[1],self.position_error[2]]
+ 
+        with open(filename, 'a', newline='') as file:
+            writer = csv.writer(file, quoting=csv.QUOTE_NONNUMERIC,
+                                delimiter=',', quotechar='~')
+            writer.writerow(row)
+
+        
+        self.x1 = np.append(self.x1, self.position_error[0])
+        self.x2 = np.append(self.x2, self.position_error[1])
+        self.x3 = np.append(self.x3,self.position_error[2])
+        self.ts = np.append(self.ts, msg.timestamp)
+
+        
+        plt.subplot(1, 3, 1)
+        plt.plot(self.ts, self.x1)
+
+        plt.subplot(1, 3, 2)
+        plt.plot(self.ts, self.x2)
+
+        plt.subplot(1, 3, 3)
+        plt.plot(self.ts, self.x3)
+
+        plt.draw()  
+        plt.pause(0.00001) 
 
     def vehicle_local_position_callback(self, msg):
         # TODO: handle NED->ENU transformation 
@@ -118,7 +156,7 @@ class Controller(Node):
         ##If we're pretty darn close ( less than 0.01 m? we can play with that a little) and the controller is responding to that (velocity setpoints are getting smaller as we converge - not overshooting like crazy ans settling on the point) then we can move on
         velocity_vector_magnitude = np.linalg.norm(self.vehicle_local_velocity)
         
-        if (np.average(np.array(abs(self.vehicle_local_position - self.des_position))) <=0.05 and velocity_vector_magnitude <= 0.05): 
+        if (np.average(np.array(abs(self.vehicle_local_position - self.des_position))) <=0.075 and velocity_vector_magnitude <= 1): 
             #if we're not on the last setpoint already
             print(self.cube.shape)
             if self.setpoint_num <= self.cube.shape[0] -1:
@@ -135,9 +173,9 @@ class Controller(Node):
             trajectory_msg.timestamp = int(Clock().now().nanoseconds / 1000)
                         
             trajectory_msg.velocity = np.array(updated_velocities,dtype=np.float32)
-            print(trajectory_msg)
+            #print(trajectory_msg)
             fill_others = np.array([np.nan, np.nan, np.nan],dtype=np.float32)
-            trajectory_msg.position = fill_others
+            trajectory_msg.position = fill_others#np.array(self.des_position,dtype=np.float32)
             trajectory_msg.acceleration = fill_others
             trajectory_msg.jerk = fill_others
             
@@ -188,21 +226,39 @@ class Controller(Node):
         msg.param1 = 0.
         self.publish_arm_command.publish(msg)
 
-    def group_controller(self, position, velocity, des_pos, des_vel): #errors, current state, etc. IN 
+    def group_controller(self, position, velocity, des_pos, des_vel, controller=2): #errors, current state, etc. IN 
         #TODO: OUR CODE HERE 
         #we'll return our controller OUTPUTS and use the timer callback function
         #to send the responses back to the AP (autopilot) at the specified frequency
         #basically the timer will run every 0.02 seconds, call THIS function to get 
         #updated control output information and then send it out
-        kp = np.diag([3, 3, 20])
-        kd = np.diag([1.2, 1.2, 2])
-              
-        e = des_pos - position
-        de = des_vel - velocity
-        
-        output = kp @ e + kd @ de 
+        if controller == 1:
+            kp = np.diag([0.1875, 0.1875, 0.55])
+            kd = np.diag([0.03, 0.03, 0.08])
+                
+            e = des_pos - position
+            de = des_vel - velocity
+            
+            output = kp @ e + kd @ de 
 
-        self.position_error = e
+            self.position_error = e
+            if output[2] >0.5:
+                output[2] = 0.5
+            if output[2] < -0.4:
+                output[2] = -0.4
+
+        if controller == 2:
+            kp = np.diag([0.1875, 0.1875, 0.65])
+            kd = np.diag([0.03, 0.03, 0.08])
+            ki = np.diag([0.5, 0.5, 0.7])
+                
+            e = des_pos - position
+            de = des_vel - velocity
+            self.i += e
+            
+            output = kp @ e + kd @ de 
+
+            self.position_error = e
 
         return output  #The output is goes directly into the velocity inputs of the autopilot
 
